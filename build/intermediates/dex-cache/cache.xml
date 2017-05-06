@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<items version="2" >
+
+    <item
+        is-multidex="false"
+        jar="C:\Users\Kenny\.gradle\caches\modules-2\files-2.1\com.google.code.gson\gson\2.4\695b63d702f505b9b916e02272e3b6381bade7f\gson-2.4.jar"
+        jumboMode="false"
+        optimize="true"
+        revision="21.1.2"
+        sha1="0695b63d702f505b9b916e02272e3b6381bade7f">
+        <dex dex="C:\Users\Kenny\Desktop\cse486\hw4\SimpleDynamo\app\build\intermediates\pre-dexed\debug\gson-2.4_fab0c1e7be682b770de6cb865c4af4fce1fbb6b2.jar" />
+    </item>
+
+</items>
