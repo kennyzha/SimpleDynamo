@@ -2,8 +2,10 @@ package edu.buffalo.cse.cse486586.simpledynamo;
 
 import android.util.Log;
 
+import java.math.BigInteger;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.Formatter;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -14,9 +16,11 @@ public class Dynamo {
     private static final int PREF_SIZE = 3;
 
     private String[] hashedNodes;
+    private SecureRandom secureRandom;
     private ConcurrentHashMap<String, String> nodeIdTranslator;
 
     public Dynamo(){
+        secureRandom = new SecureRandom();
         hashedNodes = generateHashedNodes();
         nodeIdTranslator = new ConcurrentHashMap<String, String>();
         populateTranslator(nodeIdTranslator);
@@ -24,50 +28,35 @@ public class Dynamo {
 
     private String[] generateHashedNodes(){
         String[] hashedArr = new String[nodes.length];
-        try{
-            for(int i = 0; i < hashedArr.length; i++){
-                hashedArr[i] = genHash(nodes[i]);
-            }
-        } catch(NoSuchAlgorithmException e){
-            e.printStackTrace();
-            Log.e("Dynamo", "NoSuchAlgorithmException in generateHashedNodes from Dynamo.");
+        for(int i = 0; i < hashedArr.length; i++){
+            hashedArr[i] = genHash(nodes[i]);
         }
         return hashedArr;
     }
 
     private void populateTranslator(ConcurrentHashMap<String,String> translator){
         for(String node : nodes){
-            try {
-                translator.put(node, genHash(node));
-            } catch (NoSuchAlgorithmException e) {
-                e.printStackTrace();
-                Log.e(DYNAMO_TAG, " Failed to add node to nodeIdTranslator");
-            }
+            translator.put(node, genHash(node));
         }
     }
+
     public String[] getHashedNodes(){
         return hashedNodes;
     }
 
     // Generates an array of ports that the given key needs to be replicated to.
     public int[] getPrefList(String key){
-        try {
-            String hashedKey = genHash(key);
-            int[] prefList = new int[PREF_SIZE];
+        String hashedKey = genHash(key);
+        int[] prefList = new int[PREF_SIZE];
 
-            int coordinatorIndex = getCoordinatorIndex(hashedKey);
-            Log.e(DYNAMO_TAG, "(getPrefList) Hash value for key " + key + " is " + hashedKey + " and its coordinator is " + ports[coordinatorIndex]);
-            for(int i = 0; i < prefList.length; i++){
-                prefList[i] = ports[coordinatorIndex];
-                Log.e(DYNAMO_TAG, "PrefList index " + i + " has port " + prefList[i] + " and corresponds with hashNode " + hashedNodes[coordinatorIndex]);
-                coordinatorIndex = (coordinatorIndex + 1) % ports.length;
-            }
-            return prefList;
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-            Log.e(DYNAMO_TAG, "NoSuchAlgorithmException in getPrefList from Dynamo.");
-            return null;
+        int coordinatorIndex = getCoordinatorIndex(hashedKey);
+        Log.e(DYNAMO_TAG, "(getPrefList) Hash value for key " + key + " is " + hashedKey + " and its coordinator is " + ports[coordinatorIndex]);
+        for(int i = 0; i < prefList.length; i++){
+            prefList[i] = ports[coordinatorIndex];
+            Log.e(DYNAMO_TAG, "PrefList index " + i + " has port " + prefList[i] + " and corresponds with hashNode " + hashedNodes[coordinatorIndex]);
+            coordinatorIndex = (coordinatorIndex + 1) % ports.length;
         }
+        return prefList;
     }
 
     private int getCoordinatorIndex(String hashedKey){
@@ -91,13 +80,37 @@ public class Dynamo {
         return false;
     }
 
-    public String genHash(String input) throws NoSuchAlgorithmException {
-        MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
-        byte[] sha1Hash = sha1.digest(input.getBytes());
-        Formatter formatter = new Formatter();
-        for (byte b : sha1Hash) {
-            formatter.format("%02x", b);
+    public boolean writeFinished(int[] preferenceList, int curPort){
+        return curPort == preferenceList[PREF_SIZE - 1];
+    }
+
+    // Should call writeFinished before calling this method
+    public int getNextNodePort(int[] preferenceList, int curPort){
+        for(int i = 0; i < preferenceList.length - 1; i++){
+            if(preferenceList[i] == curPort)
+                return preferenceList[i+1];
         }
-        return formatter.toString();
+        return -1;
+    }
+
+    public String genHash(String input){
+        MessageDigest sha1 = null;
+        try {
+            sha1 = MessageDigest.getInstance("SHA-1");
+            byte[] sha1Hash = sha1.digest(input.getBytes());
+            Formatter formatter = new Formatter();
+            for (byte b : sha1Hash) {
+                formatter.format("%02x", b);
+            }
+            return formatter.toString();
+        } catch (NoSuchAlgorithmException e) {
+            e.printStackTrace();
+            Log.e(DYNAMO_TAG, "NoSuchAlgorithmException in genHash from Dynamo.");
+            return null;
+        }
+    }
+
+    public String genKeyId(){
+        return new BigInteger(130, secureRandom).toString(32);
     }
 }

@@ -7,16 +7,20 @@ import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
@@ -36,17 +40,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private ExecutorService executorService = Executors.newCachedThreadPool();
 	private Uri providerUri = Uri.parse("content://edu.buffalo.cse.cse486586.simpledynamo.provider");
 	private SharedPreferences sharedPref;
-	private Dynamo dynamo;
-	private Gson gson;
-	private String nodeId;	// e.g 55554
+	private Dynamo dynamo = new Dynamo();
+	private Gson gson = new Gson();
+	private String nodeId;	// e.g "55554"
 	private int portNum;	// e.g 111108
 	private BlockingQueue<String> blockingQueue = new ArrayBlockingQueue<String>(100);
-
+	private ConcurrentHashMap<String, String> dataLog = new ConcurrentHashMap<String, String>();
+	private AtomicBoolean insertToggle = new AtomicBoolean();
 	@Override
 	public boolean onCreate() {
 		try{
-			dynamo = new Dynamo();
-			gson = new Gson();
 			sharedPref = this.getContext().getSharedPreferences(PREFS_FILE, 0);
 
 			TelephonyManager tel = (TelephonyManager) this.getContext().getSystemService(Context.TELEPHONY_SERVICE);
@@ -56,9 +59,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 			portNum = Integer.parseInt(myPort);
 
 			final ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
-//			new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
 
-			new AsyncTask<ServerSocket, Void, Void>() {
+			new AsyncTask<ServerSocket, Message, Void>() {
 				@Override
 				protected Void doInBackground(ServerSocket... params) {
 					ServerSocket serverSocket = params[0];
@@ -78,15 +80,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 							switch(receivedMsg.getMsgType()){
 								case INSERT:
-									Log.e(SERVER_TAG, "(Insert) request received. Message received " + msg);
+									Log.e(SERVER_TAG, "(Insert msgtype) received. Message received " + msg);
 									ContentValues contentValues = new ContentValues();
 									contentValues.put("key", receivedMsg.getKey());
 									contentValues.put("value", receivedMsg.getValue());
-
-									insert(providerUri, contentValues);
+									publishProgress(receivedMsg);
+									break;
+								case INSERT_RESPONSE:
+									Log.e(SERVER_TAG, "(Insert Response msgtype) received. Message received " + msg);
 									break;
 							}
-
 							br.close();
 							pw.close();
 							socket.close();
@@ -96,14 +99,30 @@ public class SimpleDynamoProvider extends ContentProvider {
 						}
 					}
 				}
+				@Override
+				protected void onProgressUpdate(Message... values) {
+					Message message = values[0];
+					insertSharedPref(message);
+					// forward it to next port or send back a write completed acknowledgement to original requester
+					if(dynamo.writeFinished(message.getPrefList(), portNum)){
+						//send back insert completed acknowledgement
+						Log.e(SERVER_TAG, "(onProgressUpdate) write finished. Sending back Insert Response from the current port " + portNum);
+						message.setMsgType(MessageType.INSERT_RESPONSE);
+						message.setToPort(message.getFromPort());
+					} else{
+						int nextPort = dynamo.getNextNodePort(message.getPrefList(), portNum);
+						message.setToPort(nextPort);
+						Log.e(SERVER_TAG, "(onProgressUpdate) write is not finished. Sending to next port on preference list which is port " + nextPort);
+					}
+					new ClientTask().executeOnExecutor(executorService, gson.toJson(message));
+
+				}
 			}.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
 
 			String[] hashedPorts = dynamo.getHashedNodes();
 			for (int i = 0; i < hashedPorts.length; i++) {
 				Log.e(ONCREATE_TAG,"Port " + Dynamo.ports[i] + " Hashed Port " + hashedPorts[i]);
 			}
-//			int[] prefList = dynamo.getPrefList("key5");
-
 		} catch(IOException e){
 
 		}
@@ -121,33 +140,37 @@ public class SimpleDynamoProvider extends ContentProvider {
 		return null;
 	}
 
+	// Forward it to the first port on prefList. Insert is only called by outside applications
 	@Override
 	public Uri insert(Uri uri, ContentValues values) {
 		String key = values.getAsString("key");
 		String val = values.getAsString("value");
 		int[] prefList = dynamo.getPrefList(key);
 
-		if(dynamo.isInCorrectPartition(key, portNum)){
-			Log.v("insert", "Storing the key " + key + " in port " + portNum) ;
-			SharedPreferences.Editor editor = sharedPref.edit();
-			editor.putString(key, val);
-			editor.apply(); // commit?
+		Log.e("Insert", " Forwarding Key " + key + " from port " + portNum + " to port " + prefList[0]);
+		Message msg = new Message(MessageType.INSERT, key, val, prefList, portNum, prefList[0]);
+		new ClientTask().executeOnExecutor(executorService, gson.toJson(msg));
 
-			// forward it to next port or send back a write completed acknowledgement to original requester
-		} else {
-			// forward it to the first port on prefList
-			Log.e("Insert", " Key " + key + " doesn't belongs in port " + portNum + " forwarding to port " + prefList[0]);
-			Message msg = new Message(MessageType.INSERT, key, val, prefList, portNum, prefList[0]);
-			new ClientTask().executeOnExecutor(executorService, gson.toJson(msg));
-		}
-		return null;
+		return uri;
 	}
 
+	// @ - returns all <key, value> pairs stored in your local partition of the node
+	// * - returns all <key, value> pairs stored in your entire DHT
 	@Override
-	public Cursor query(Uri uri, String[] projection, String selection,
-			String[] selectionArgs, String sortOrder) {
-		// TODO Auto-generated method stub
-		return null;
+	public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+		MatrixCursor mc = new MatrixCursor(new String[]{"key","value"});
+
+		if(selection.equals("@")){
+			Map<String, ?> allEntries = sharedPref.getAll();
+
+			for(Map.Entry<String,?> entry : allEntries.entrySet()) {
+				mc.addRow(new String[]{entry.getKey(), entry.getValue().toString()});
+			}
+		} else{
+			String value = sharedPref.getString(selection, "KEY DOES NOT EXISTS");
+			mc.addRow(new String[]{selection, value});
+		}
+		return mc;
 	}
 
 	@Override
@@ -155,5 +178,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 			String[] selectionArgs) {
 		// TODO Auto-generated method stub
 		return 0;
+	}
+
+	private void insertSharedPref(Message msg){
+		Log.v("insert", "Storing the key " + msg.getKey() + " hashedVal " + dynamo.genHash(msg.getKey()) + " in port " + portNum) ;
+		SharedPreferences.Editor editor = sharedPref.edit();
+		editor.putString(msg.getKey(), msg.getValue());
+		editor.apply();
 	}
 }
