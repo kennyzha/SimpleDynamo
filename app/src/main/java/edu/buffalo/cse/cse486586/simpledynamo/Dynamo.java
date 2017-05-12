@@ -16,11 +16,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class Dynamo {
     private static final String DYNAMO_TAG = "Dynamo";
+    private static final int PREF_SIZE = 3;
     public static final String[] NODES = {"5562", "5556", "5554", "5558", "5560"};
     public static final int[] PORTS = {11124, 11112, 11108, 11116, 11120};
-    public static final String KEY = "key";
-    public static final String VALUE = "value";
-    private static final int PREF_SIZE = 3;
 
     private String[] hashedNodes;
     private SecureRandom secureRandom;
@@ -101,7 +99,7 @@ public class Dynamo {
     }
 
     public String genHash(String input){
-        MessageDigest sha1 = null;
+        MessageDigest sha1;
         try {
             sha1 = MessageDigest.getInstance("SHA-1");
             byte[] sha1Hash = sha1.digest(input.getBytes());

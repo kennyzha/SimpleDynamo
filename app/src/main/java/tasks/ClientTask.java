@@ -13,20 +13,20 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketAddress;
-import java.net.UnknownHostException;
 
 import edu.buffalo.cse.cse486586.simpledynamo.Message;
 
 public class ClientTask extends AsyncTask<String, Void, Void>{
     private static final String CLIENT_TAG = "Client";
-    Gson gson = new Gson();
+    private Gson gson = new Gson();
+
     @Override
     protected Void doInBackground(String... params) {
         String msgJson = params[0];
-        Message msg = gson.fromJson(msgJson, Message.class);
+        Message message = gson.fromJson(msgJson, Message.class);
         try {
             SocketAddress socketAddress = new InetSocketAddress(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-                    msg.getToPort());
+                    message.getToPort());
             Socket socket = new Socket();
             socket.connect(socketAddress, 2 * 1000);
             Log.e(CLIENT_TAG, "Client is connected");
@@ -44,11 +44,11 @@ public class ClientTask extends AsyncTask<String, Void, Void>{
             br.close();
             pw.close();
             socket.close();
-        } catch (UnknownHostException e) {
-            e.printStackTrace();
         } catch (IOException e) {
             e.printStackTrace();
+            Log.e(CLIENT_TAG, "EXCEPTION Message received was  " + msgJson);
         }
         return null;
     }
+
 }

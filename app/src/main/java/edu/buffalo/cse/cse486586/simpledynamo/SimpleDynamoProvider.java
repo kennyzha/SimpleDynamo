@@ -44,9 +44,13 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private Gson gson = new Gson();
 	private String nodeId;	// e.g "55554"
 	private int portNum;	// e.g 111108
-	private BlockingQueue<String> blockingQueue = new ArrayBlockingQueue<String>(100);
-	private ConcurrentHashMap<String, String> dataLog = new ConcurrentHashMap<String, String>();
+
+    private ConcurrentHashMap<String, String> dataLog = new ConcurrentHashMap<String, String>();
     private BlockingQueue<String> deleteBlockingQueue = new ArrayBlockingQueue<String>(100);
+    private BlockingQueue<String> blockingQueue = new ArrayBlockingQueue<String>(100);
+    private BlockingQueue<String> insertBlockingQueue = new ArrayBlockingQueue<String>(100);
+    private ConcurrentHashMap<String, Message> blockingHm = new ConcurrentHashMap<String, Message>();
+    private Object lock = new Object();
 
 	@Override
 	public boolean onCreate() {
@@ -96,6 +100,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 									publishProgress(receivedMsg);
 									break;
 								case INSERT_RESPONSE:
+                                    insertBlockingQueue.put(msg);
 									break;
                                 case DELETE:
                                     dynamo.deleteFromSharedPref(sharedPref, receivedMsg.getKey());
@@ -157,6 +162,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         }
                     }
 				}
+
 				@Override
 				protected void onProgressUpdate(Message... values) {
 					new ClientTask().executeOnExecutor(executorService, gson.toJson(values[0]));
@@ -203,7 +209,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	@Override
 	public String getType(Uri uri) {
-		// TODO Auto-generated method stub
 		return null;
 	}
 
@@ -217,8 +222,13 @@ public class SimpleDynamoProvider extends ContentProvider {
 		Log.e("Insert", " Forwarding Key " + key + " from port " + portNum + " to port " + prefList[0]);
 		Message msg = new Message(MessageType.INSERT, key, val, prefList, portNum, prefList[0]);
 		new ClientTask().executeOnExecutor(executorService, gson.toJson(msg));
-
-		return uri;
+        try {
+            String jsonMsg = insertBlockingQueue.take();
+            Log.v("Insert", "Insert Blocking queue had the message " + jsonMsg);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        return uri;
 	}
 
 	// @ - returns all <key, value> pairs stored in your local partition of the node
@@ -254,15 +264,26 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
             } else{
                     int[] prefLst = dynamo.getPrefList(selection);
-                    Message msg = new Message(MessageType.QUERY, selection, "placeholder", prefLst, portNum, prefLst[prefLst.length - 1]);
+                    Message msg = new Message(MessageType.QUERY, selection, null, prefLst, portNum, prefLst[prefLst.length - 1]);
                     new ClientTask().executeOnExecutor(executorService, gson.toJson(msg, Message.class));
 
                     jsonResponse = blockingQueue.take();
-                    Log.v(QUERY_TAG, "Queried key " + selection + " from port " + prefLst[prefLst.length-1] + " and received response: " + jsonResponse );
+                    Message curMsg = gson.fromJson(jsonResponse, Message.class);
+                    synchronized (lock){
+                        blockingHm.put(curMsg.getKey(), curMsg);
+                        lock.notifyAll();
 
-                    Message responseMsg = gson.fromJson(jsonResponse, Message.class);
+                        while(!blockingHm.containsKey(selection)){
+                            Log.v(QUERY_TAG, "Queried key " + selection + " from port " + prefLst[prefLst.length-1] + " and received DIFFERENT response: " + jsonResponse );
+                            Log.v(QUERY_TAG, "HM DOESNT CONTAIN THE KEY. WAITING FOR RIGHT KEY " + selection);
+                            lock.wait();
+                        }
+                    }
+                    Message responseMsg = blockingHm.get(selection);
+                    blockingHm.remove(selection);
                     mc.addRow(new String[]{selection, responseMsg.getValue()});
-
+                    Log.v(QUERY_TAG, " KEY IS THE RIGHT ONE. ADDED TO MATRIX CURSOR");
+                    Log.v(QUERY_TAG, "Queried key " + selection + " from port " + prefLst[prefLst.length-1] + " and received response: " + responseMsg.toString() );
             }
         } catch (InterruptedException e) {
         e.printStackTrace();
