@@ -1,8 +1,6 @@
 package edu.buffalo.cse.cse486586.simpledynamo;
 
 import android.content.SharedPreferences;
-import android.database.Cursor;
-import android.database.MatrixCursor;
 import android.util.Log;
 
 import java.math.BigInteger;
@@ -20,15 +18,50 @@ public class Dynamo {
     public static final String[] NODES = {"5562", "5556", "5554", "5558", "5560"};
     public static final int[] PORTS = {11124, 11112, 11108, 11116, 11120};
 
+    private ConcurrentHashMap<Integer, ConcurrentHashMap<String, String>> portsLog;     // ConcurrentHashMap<port, <key, value>>
     private String[] hashedNodes;
     private SecureRandom secureRandom;
-    private ConcurrentHashMap<String, String> nodeIdTranslator;
 
     public Dynamo(){
         secureRandom = new SecureRandom();
         hashedNodes = generateHashedNodes();
-        nodeIdTranslator = new ConcurrentHashMap<String, String>();
-        populateTranslator(nodeIdTranslator);
+        portsLog = new ConcurrentHashMap<Integer, ConcurrentHashMap<String, String>>();
+        populatePortsLog();
+    }
+
+    private void populatePortsLog() {
+        for(int i = 0; i < PORTS.length; i++){
+            int curPort = PORTS[i];
+            portsLog.put(curPort, new ConcurrentHashMap<String, String>());
+            Log.v(DYNAMO_TAG, "Placed port " + curPort + " into portsLog");
+        }
+    }
+
+    public void insertInPortsLog(String key, String value, int[] prefList){
+        for(int i = 0; i < prefList.length; i++){
+            portsLog.get(prefList[i]).put(key, value);
+        }
+    }
+
+    public void deleteFromPortsLog(String key, int[] prefList){
+        for(int i = 0; i < prefList.length; i++){
+            portsLog.get(prefList[i]).remove(key);
+        }
+    }
+
+    public void setMsgToPortsLog(Message m, int port){
+        StringBuilder keys = new StringBuilder();
+        StringBuilder values = new StringBuilder();
+
+        ConcurrentHashMap<String, String> data = portsLog.get(port);
+        for(Map.Entry<String, String> entry: data.entrySet()){
+            keys.append(entry.getKey() + ":::");
+            values.append(entry.getValue() + ":::");
+        }
+        Log.v(DYNAMO_TAG, "setMsgToPortsLog set Message keys " + keys.toString());
+        Log.v(DYNAMO_TAG, "setMsgToPortsLog set Message value to " + values.toString());
+        m.setKey(keys.toString());
+        m.setValue(values.toString());
     }
 
     private String[] generateHashedNodes(){
@@ -37,12 +70,6 @@ public class Dynamo {
             hashedArr[i] = genHash(NODES[i]);
         }
         return hashedArr;
-    }
-
-    private void populateTranslator(ConcurrentHashMap<String,String> translator){
-        for(String node : NODES){
-            translator.put(node, genHash(node));
-        }
     }
 
     public String[] getHashedNodes(){
@@ -151,4 +178,24 @@ public class Dynamo {
         }
         editor.commit();
     }
+
+    public int getSuccessorPort(int port){
+        for(int i = 0; i < PORTS.length; i++){
+            if(PORTS[i] == port){
+                int successorIndex = (i + 1) % PORTS.length;
+                return PORTS[successorIndex];
+            }
+        }
+        return -1;
+    }
+
+    public int getPredecessorPort(int port){
+        for(int i = PORTS.length - 1; i >= 1; i--){
+            if(PORTS[i] == port){
+                return PORTS[i - 1];
+            }
+        }
+        return PORTS[PORTS.length - 1];
+    }
+
 }

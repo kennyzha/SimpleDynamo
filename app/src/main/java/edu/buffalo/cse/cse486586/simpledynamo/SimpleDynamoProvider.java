@@ -14,6 +14,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -45,26 +47,28 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private String nodeId;	// e.g "55554"
 	private int portNum;	// e.g 111108
 
-    private ConcurrentHashMap<String, String> dataLog = new ConcurrentHashMap<String, String>();
     private BlockingQueue<String> deleteBlockingQueue = new ArrayBlockingQueue<String>(100);
     private BlockingQueue<String> blockingQueue = new ArrayBlockingQueue<String>(100);
     private BlockingQueue<String> insertBlockingQueue = new ArrayBlockingQueue<String>(100);
-    private ConcurrentHashMap<String, Message> blockingHm = new ConcurrentHashMap<String, Message>();
-    private Object lock = new Object();
+    private ConcurrentHashMap<String, Message> queryHm = new ConcurrentHashMap<String, Message>();
+    private ConcurrentHashMap<String, Message> insertHm = new ConcurrentHashMap<String, Message>();
+
+    private final Object queryLock = new Object();
+    private final Object insertLock = new Object();
+    private final Object updateLock = new Object();
+    private AtomicInteger numUpdates = new AtomicInteger();
 
 	@Override
 	public boolean onCreate() {
 		try{
 			sharedPref = this.getContext().getSharedPreferences(PREFS_FILE, 0);
-
 			TelephonyManager tel = (TelephonyManager) this.getContext().getSystemService(Context.TELEPHONY_SERVICE);
 			final String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
 			final String myPort = String.valueOf((Integer.parseInt(portStr) * 2));
 			nodeId = portStr;
 			portNum = Integer.parseInt(myPort);
 
-			final ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
-
+            final ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
 			new AsyncTask<ServerSocket, Message, Void>() {
 				@Override
 				protected Void doInBackground(ServerSocket... params) {
@@ -85,7 +89,18 @@ public class SimpleDynamoProvider extends ContentProvider {
                             Log.e(SERVER_TAG, receivedMsg.getMsgType() + " msgtype) received. Message received " + msg);
                             switch(receivedMsg.getMsgType()){
 								case INSERT:
+                                    synchronized (updateLock){
+                                        while(numUpdates.get() != 2){
+                                            try {
+                                                Log.v("Insert", " WAITING FOR UPDATES TO FINISH NUM UPDATES IS " + numUpdates.get());
+                                                updateLock.wait();
+                                            } catch (InterruptedException e) {
+                                                e.printStackTrace();
+                                            }
+                                        }
+                                    }
                                     dynamo.insertToSharedPref(sharedPref, receivedMsg);
+                                    dynamo.insertInPortsLog(receivedMsg.getKey(), receivedMsg.getValue(), receivedMsg.getPrefList());
                                     // forward it to next port or send back a write completed acknowledgement to original requester
                                     if(dynamo.writeFinished(receivedMsg.getPrefList(), portNum)){
                                         //send back insert completed acknowledgement
@@ -103,7 +118,19 @@ public class SimpleDynamoProvider extends ContentProvider {
                                     insertBlockingQueue.put(msg);
 									break;
                                 case DELETE:
+                                    synchronized (updateLock){
+                                        while(numUpdates.get() != 2){
+                                            try {
+                                                Log.v("Delete", " WAITING FOR UPDATES TO FINISH NUM UPDATES IS " + numUpdates.get());
+                                                updateLock.wait();
+                                            } catch (InterruptedException e) {
+                                                e.printStackTrace();
+                                            }
+                                        }
+                                    }
                                     dynamo.deleteFromSharedPref(sharedPref, receivedMsg.getKey());
+                                    dynamo.deleteFromPortsLog(receivedMsg.getKey(), receivedMsg.getPrefList());
+
                                     if(dynamo.writeFinished(receivedMsg.getPrefList(), portNum)){
                                         Log.e(SERVER_TAG, "Delete write finished. Sending back Delete Response from the current port " + portNum);
                                         receivedMsg.setMsgType(MessageType.DELETE_RESPONSE);
@@ -120,6 +147,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                                     deleteBlockingQueue.put(msg);
                                     break;
                                 case QUERY:
+                                    synchronized (updateLock){
+                                        while(numUpdates.get() != 2){
+                                            try {
+                                                Log.v("Query", " WAITING FOR UPDATES TO FINISH NUM UPDATES IS " + numUpdates.get());
+                                                updateLock.wait();
+                                            } catch (InterruptedException e) {
+                                                e.printStackTrace();
+                                            }
+                                        }
+                                    }
                                     String receivedKey = receivedMsg.getKey();
                                     if(receivedKey.equals("@")){
                                         Log.e(SERVER_TAG, "REMOTE @@@@@ (Query msgtype) received. Queried key: " + receivedMsg.getKey());
@@ -150,15 +187,55 @@ public class SimpleDynamoProvider extends ContentProvider {
                                     blockingQueue.put(msg);
                                     Log.e(SERVER_TAG, "(QueryRESPONSE msgtype) received. Placed message into blocking queue: " + msg);
                                     break;
+                                case UPDATE:
+                                    Log.e(SERVER_TAG, "UPDATE REQUESTED FROM PORT " + receivedMsg.getFromPort() + " CURRENT PORT IS " + portNum);
+                                    Thread.sleep(20);
+                                    receivedMsg.setMsgType(MessageType.UPDATE_RESPONSE);
+                                    receivedMsg.setToPort(receivedMsg.getFromPort());
+                                    dynamo.setMsgToPortsLog(receivedMsg, receivedMsg.getFromPort());
+                                    publishProgress(receivedMsg);
+                                    break;
+                                case UPDATE_RESPONSE:
+                                    Log.e(SERVER_TAG, "UPDATE RESPONSE RECEIVED WITH MESSAGE " + receivedMsg.toString());
+                                    synchronized (updateLock){
+                                        numUpdates.getAndIncrement();
+                                        String[] keys = receivedMsg.getKey().split(":::");
+                                        String[] values = receivedMsg.getValue().split(":::");
+                                        HashMap<String, String> hm = new HashMap<String, String>();
+
+                                        Map<String, ?> allEntries = sharedPref.getAll();
+                                        for(Map.Entry<String, ?> entry : allEntries.entrySet()){
+                                            hm.put(entry.getKey(), entry.getValue().toString());
+                                        }
+
+                                        SharedPreferences.Editor editor = sharedPref.edit();
+                                        for(int i = 0; i < keys.length; i++) {
+                                            if(keys[i].equals(""))
+                                                continue;
+                                            if (!hm.containsKey(keys[i])) {
+                                                editor.putString(keys[i], values[i]);
+                                                Log.v(SERVER_TAG, " SHAREDPREF DOES NOT CONTAIN KEY " + keys[i] + " PUTTING IT IN SHAREDPREF WITH VALUE " + values[i]);
+                                            } else if(!hm.get(keys[i]).equals(values[i])){
+                                                editor.putString(keys[i], values[i]);
+                                                Log.v(SERVER_TAG, " UPDATING KEY " + keys[i] + " WHICH HAS STALE VALUE " + hm.get(keys[i]) + " WITH NEW VALUE " + values[i]);
+                                            }
+                                        }
+                                        editor.apply();
+                                        if(numUpdates.get() == 2){
+                                            Log.v(SERVER_TAG, "UPDATES ARE FINISHED!!!!");
+                                            updateLock.notifyAll();
+                                        }
+                                    }
+                                    break;
 							}
 							br.close();
 							pw.close();
 							socket.close();
 						} catch (IOException e) {
 							e.printStackTrace();
-							return null;
 						} catch (InterruptedException e) {
                             e.printStackTrace();
+                            return null;
                         }
                     }
 				}
@@ -173,6 +250,11 @@ public class SimpleDynamoProvider extends ContentProvider {
 			for (int i = 0; i < hashedPorts.length; i++) {
 				Log.e(ONCREATE_TAG,"Port " + Dynamo.PORTS[i] + " Hashed Port " + hashedPorts[i]);
 			}
+            Message successorUpdateMsg = new Message(MessageType.UPDATE, null, null, null, portNum, dynamo.getSuccessorPort(portNum));
+            Message predecessorUpdateMsg = new Message(MessageType.UPDATE, null, null, null, portNum, dynamo.getPredecessorPort(portNum));
+            new ClientTask().executeOnExecutor(executorService, gson.toJson(successorUpdateMsg));
+            new ClientTask().executeOnExecutor(executorService, gson.toJson(predecessorUpdateMsg));
+
 		} catch(IOException e){
             e.printStackTrace();
 		}
@@ -180,6 +262,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 	}
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
+        synchronized (updateLock){
+            while(numUpdates.get() != 2){
+                try {
+                    Log.v("Delete", " WAITING FOR UPDATES TO FINISH NUM UPDATES IS " + numUpdates.get());
+                    updateLock.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
         if(selection.equals("@") || selection.equals("*")){
             SharedPreferences.Editor editor = sharedPref.edit();
             editor.clear();
@@ -223,8 +315,19 @@ public class SimpleDynamoProvider extends ContentProvider {
 		Message msg = new Message(MessageType.INSERT, key, val, prefList, portNum, prefList[0]);
 		new ClientTask().executeOnExecutor(executorService, gson.toJson(msg));
         try {
-            String jsonMsg = insertBlockingQueue.take();
-            Log.v("Insert", "Insert Blocking queue had the message " + jsonMsg);
+            String jsonResponse = insertBlockingQueue.take();
+            Message curMsg = gson.fromJson(jsonResponse, Message.class);
+            synchronized (insertLock){
+                insertHm.put(curMsg.getKey(), curMsg);
+                insertLock.notifyAll();
+
+                while(!insertHm.containsKey(key)){
+                    Log.v("Insert", "Insert key " + key + " and received DIFFERENT key response: " + jsonResponse );
+                    Log.v("Insert", "HM DOESNT CONTAIN THE KEY. WAITING FOR RIGHT KEY " + key);
+                    insertLock.wait();
+                }
+            }
+            insertHm.remove(key);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
@@ -235,6 +338,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 	// * - returns all <key, value> pairs stored in your entire DHT
 	@Override
 	public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+        synchronized (updateLock){
+            while(numUpdates.get() != 2){
+                try {
+                    Log.v("Query", " WAITING FOR UPDATES TO FINISH NUM UPDATES IS " + numUpdates.get());
+                    updateLock.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
 		MatrixCursor mc = new MatrixCursor(new String[]{"key","value"});
 		String jsonResponse;
         try {
@@ -254,6 +367,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                     for(int i = 0; i < Dynamo.PORTS.length - 1; i++){
                         jsonResponse = blockingQueue.take();
                         Message msg = gson.fromJson(jsonResponse, Message.class);
+                        if(msg.getKey().equals("")) continue;
+
                         String[] allKeys = msg.getKey().split(":::");
                         String[] allValues = msg.getValue().split(":::");
                         Log.v(QUERY_TAG, " ******ALL KEYS " + Arrays.toString(allKeys) + " ALL VALUES " + Arrays.toString(allValues));
@@ -263,27 +378,27 @@ public class SimpleDynamoProvider extends ContentProvider {
                     }
                 }
             } else{
-                    int[] prefLst = dynamo.getPrefList(selection);
-                    Message msg = new Message(MessageType.QUERY, selection, null, prefLst, portNum, prefLst[prefLst.length - 1]);
+                    int[] prefList = dynamo.getPrefList(selection);
+                    Message msg = new Message(MessageType.QUERY, selection, null, prefList, portNum, prefList[prefList.length - 1]);
                     new ClientTask().executeOnExecutor(executorService, gson.toJson(msg, Message.class));
 
                     jsonResponse = blockingQueue.take();
                     Message curMsg = gson.fromJson(jsonResponse, Message.class);
-                    synchronized (lock){
-                        blockingHm.put(curMsg.getKey(), curMsg);
-                        lock.notifyAll();
+                    synchronized (queryLock){
+                        queryHm.put(curMsg.getKey(), curMsg);
+                        queryLock.notifyAll();
 
-                        while(!blockingHm.containsKey(selection)){
-                            Log.v(QUERY_TAG, "Queried key " + selection + " from port " + prefLst[prefLst.length-1] + " and received DIFFERENT response: " + jsonResponse );
+                        while(!queryHm.containsKey(selection)){
+                            Log.v(QUERY_TAG, "Queried key " + selection + " from last port " + prefList[prefList.length-1] + " and received DIFFERENT response: " + jsonResponse );
                             Log.v(QUERY_TAG, "HM DOESNT CONTAIN THE KEY. WAITING FOR RIGHT KEY " + selection);
-                            lock.wait();
+                            queryLock.wait();
                         }
                     }
-                    Message responseMsg = blockingHm.get(selection);
-                    blockingHm.remove(selection);
+                    Message responseMsg = queryHm.get(selection);
+                    queryHm.remove(selection);
                     mc.addRow(new String[]{selection, responseMsg.getValue()});
                     Log.v(QUERY_TAG, " KEY IS THE RIGHT ONE. ADDED TO MATRIX CURSOR");
-                    Log.v(QUERY_TAG, "Queried key " + selection + " from port " + prefLst[prefLst.length-1] + " and received response: " + responseMsg.toString() );
+                    Log.v(QUERY_TAG, "Queried key " + selection + " from port " + prefList[prefList.length-1] + " and received response: " + responseMsg.toString() );
             }
         } catch (InterruptedException e) {
         e.printStackTrace();

@@ -1,5 +1,7 @@
 package edu.buffalo.cse.cse486586.simpledynamo;
 
+import android.util.Log;
+
 public class Message {
     private MessageType msgType;
     private String key;
@@ -47,6 +49,15 @@ public class Message {
         this.prefList = prefList;
     }
 
+    public int getPrefListIndex(int port){
+        for(int i = 0; i < prefList.length; i++){
+            if(prefList[i] == port)
+                return i;
+        }
+        Log.e("MESSAGE", "getPrefListIndex DOES NOT CONTAIN PORT " + port);
+        return -1;
+    }
+
     public int getFromPort() {
         return fromPort;
     }
@@ -64,6 +75,6 @@ public class Message {
     }
 
     public String toString(){
-        return "MsgType: " + msgType + " key: " + key + " value: " + value + " prefList: " + prefList[0] + "," + prefList[1] + "," + prefList[2] + " fromPort: " + fromPort + " toPort: " + toPort;
+        return "MsgType: " + msgType + " key: " + key + " value: " + value + " fromPort: " + fromPort + " toPort: " + toPort;
     }
 }

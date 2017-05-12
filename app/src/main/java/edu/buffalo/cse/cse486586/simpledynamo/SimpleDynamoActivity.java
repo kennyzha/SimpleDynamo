@@ -18,15 +18,6 @@ public class SimpleDynamoActivity extends Activity {
     
 		TextView tv = (TextView) findViewById(R.id.textView1);
         tv.setMovementMethod(new ScrollingMovementMethod());
-
-		Gson gson = new Gson();
-		Message m1 = new Message(MessageType.INSERT, "key", "value", new int[]{1,2,3}, 50000, 123456 );
-		String m1Json = gson.toJson(m1);
-		Message m2 = gson.fromJson(m1Json, Message.class);
-
-		Log.e("Test", "onCreate: " + m1Json);
-		Log.e("Test", m2.toString());
-
 	}
 
 	@Override
